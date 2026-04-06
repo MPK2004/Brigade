@@ -2,7 +2,7 @@ import json
 import re
 import os
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 import atexit
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
@@ -58,9 +58,11 @@ def hard_filter(payload, bhk=None, max_price=None, locality=None):
     # 3. Locality Constraint (Strict check with normalization)
     if locality:
         target_loc = str(locality).lower()
-        # Accept if direct match or known city mapping or if it's in the name or description
         searchable_text = f"{p_locality} {payload.get('name', '')} {payload.get('description', '')}".lower()
-        if target_loc not in searchable_text and city_map.get(target_loc, "") not in searchable_text:
+        
+        # Accept if target_loc is in text, OR if a valid mapped city is in text
+        mapped_loc = city_map.get(target_loc)
+        if target_loc not in searchable_text and (not mapped_loc or mapped_loc not in searchable_text):
             return False
 
     return True
@@ -98,6 +100,7 @@ def rerank(results, params):
     max_price = params.get("max_price")
     locality = params.get("locality")
     intents = params.get("intents", [])
+    offset = params.get("offset", 0)
 
     valid_results = []
     for r in results:
@@ -112,8 +115,8 @@ def rerank(results, params):
     # Sort valid results by score
     valid_results.sort(key=lambda x: x[0], reverse=True)
     
-    # Return exactly the Top 3
-    return [p for _, p in valid_results[:3]]
+    # Return exactly the Top 3 starting from the given offset
+    return [p for _, p in valid_results[offset:offset+3]]
 
 def search_tool(query, params=None):
     """
@@ -128,7 +131,7 @@ def search_tool(query, params=None):
     results = client.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
-        limit=20
+        limit=50
     ).points
 
     # Deterministic Filtering & Reranking
