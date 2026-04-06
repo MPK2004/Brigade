@@ -2,7 +2,7 @@ import json
 import re
 import os
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from sentence_transformers import SentenceTransformer

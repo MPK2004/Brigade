@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 import json
 from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
@@ -9,8 +9,8 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from tools import search_tool
 
 # Split LLMs: 70b to think/plan reliably, 8b to respond rapidly
-planner_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
-responder_llm = ChatGroq(model="meta-llama/llama-prompt-guard-2-86m", temperature=0)
+planner_llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.4)
+responder_llm = ChatGroq(model="openai/gpt-oss-20b", temperature=1.3)
 
 class AgentState(TypedDict):
     query: str
@@ -41,6 +41,7 @@ def planner_node(state: AgentState):
     RULES:
     1. Reference Resolution: If the user says "the 2nd property", "the first one", or "it", replace the "query" field with the EXACT project name from the Assistant's previous message list.
     2. Filter Inheritance: Retain previous filters (like BHK or budget) ONLY IF the user hasn't changed them. If the user mentions a new location (e.g., 'what about whitefield'), UPDATE the locality parameter and OVERWRITE the old one.
+    3. Pagination: If the user asks for "more", "others", or "next", preserve the previous filters but add an 'offset' parameter (integer, default 0) to skip previously shown properties (e.g., set offset to 3 to show the next 3).
     
     EXAMPLES:
     History:
@@ -54,9 +55,17 @@ def planner_node(state: AgentState):
     ASSISTANT: 1. Brigade Omega...
     LATEST QUERY: what about whitefield
     OUTPUT: {{"query": "whitefield", "params": {{"bhk": 3, "locality": "whitefield"}}}}
+
+    History:
+    USER: properties in bengaluru
+    ASSISTANT: 1. Brigade Omega... 2. Brigade Panorama... 3. Brigade Symphony...
+    LATEST QUERY: are there any others?
+    OUTPUT: {{"query": "bengaluru", "params": {{"locality": "bengaluru", "offset": 3}}}}
     
-    Return ONLY JSON with 'query' and 'params' (bhk, max_price, locality, intents).
+    Return ONLY JSON with 'query', 'params' (bhk, max_price, locality, intents, offset), and 'is_property_search' (boolean).
     NOTE: 'locality' MUST capture any city, neighborhood, or area mentioned (e.g., 'Whitefield', 'Yelahanka', 'Chennai').
+    NOTE: 'max_price' MUST be a number representing LAKHS (e.g., "1 Crore" = 100, "50 Lakhs" = 50).
+    If the user's input is just a greeting (e.g., "hi", "hello") or general conversation, set 'is_property_search' to false.
     """
     
     messages = [SystemMessage(content=system_prompt)]
@@ -80,6 +89,11 @@ def tool_node(state: AgentState):
     Deterministic search and filtering.
     """
     args = state["tool_args"]
+    is_search = args.get("is_property_search", True)
+    
+    if not is_search:
+        return {"tool_result": ["CHITCHAT"]}
+        
     query = args.get("query", state["query"])
     params = args.get("params", {})
     
@@ -93,6 +107,18 @@ def responder_node(state: AgentState):
     """
     result = state["tool_result"]
     query = state["query"]
+    
+    if result == ["CHITCHAT"]:
+        system_prompt = f"""
+        Act as a professional Property Advisor for Brigade Group.
+        User Query: {query}
+        
+        Respond warmly to the user's greeting or conversational message, and politely ask how you can assist them with finding a property today.
+        Keep it brief, professional, and do not list any properties.
+        """
+        messages = [SystemMessage(content=system_prompt)]
+        response = responder_llm.invoke(messages)
+        return {"response": response.content}
     
     if not result:
         return {"response": "No matching properties found under your specific criteria. Would you like to check a different budget or location?"}
