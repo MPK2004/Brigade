@@ -40,15 +40,20 @@ def planner_node(state: AgentState):
     
     RULES:
     1. Reference Resolution: If the user says "the 2nd property", "the first one", or "it", replace the "query" field with the EXACT project name from the Assistant's previous message list.
-    2. Filter Inheritance: If the user specified a location (e.g., Chennai) or BHK in a previous turn, and hasn't changed it, retain those parameters in the JSON output.
+    2. Filter Inheritance: Retain previous filters (like BHK or budget) ONLY IF the user hasn't changed them. If the user mentions a new location (e.g., 'what about whitefield'), UPDATE the locality parameter and OVERWRITE the old one.
     
-    EXAMPLE BEHAVIOR:
+    EXAMPLES:
     History:
-    USER: 3 BHK in Chennai
-    ASSISTANT: 1. Brigade Icon... 2. Brigade Stellaris...
+    USER: 3 BHK in South Bangalore
+    ASSISTANT: 1. Brigade Omega... 2. Brigade Panorama...
     LATEST QUERY: tell me about the second one
-    OUTPUT:
-    {{"query": "Brigade Stellaris", "params": {{"bhk": 3, "locality": "Chennai"}}}}
+    OUTPUT: {{"query": "Brigade Panorama", "params": {{"bhk": 3, "locality": "South Bangalore"}}}}
+    
+    History:
+    USER: 3 BHK in South Bangalore
+    ASSISTANT: 1. Brigade Omega...
+    LATEST QUERY: what about whitefield
+    OUTPUT: {{"query": "whitefield", "params": {{"bhk": 3, "locality": "whitefield"}}}}
     
     Return ONLY JSON with 'query' and 'params' (bhk, max_price, locality, intents).
     """
