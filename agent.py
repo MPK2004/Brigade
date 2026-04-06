@@ -10,7 +10,7 @@ from tools import search_tool
 
 # Split LLMs: 70b to think/plan reliably, 8b to respond rapidly
 planner_llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.4)
-responder_llm = ChatGroq(model="openai/gpt-oss-20b", temperature=1.3)
+responder_llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0.2)
 
 class AgentState(TypedDict):
     query: str
@@ -62,9 +62,10 @@ def planner_node(state: AgentState):
     LATEST QUERY: are there any others?
     OUTPUT: {{"query": "bengaluru", "params": {{"locality": "bengaluru", "offset": 3}}}}
     
-    Return ONLY JSON with 'query', 'params' (bhk, max_price, locality, intents, offset), and 'is_property_search' (boolean).
+    Return ONLY JSON with 'query', 'params' (bhk, max_price, locality, intents, offset, sort_price_asc), and 'is_property_search' (boolean).
     NOTE: 'locality' MUST capture any city, neighborhood, or area mentioned (e.g., 'Whitefield', 'Yelahanka', 'Chennai').
     NOTE: 'max_price' MUST be a number representing LAKHS (e.g., "1 Crore" = 100, "50 Lakhs" = 50).
+    If the user asks for 'least', 'cheapest', or 'lowest price', set 'sort_price_asc': true in the params JSON.
     If the user's input is just a greeting (e.g., "hi", "hello") or general conversation, set 'is_property_search' to false.
     """
     
@@ -144,6 +145,7 @@ def responder_node(state: AgentState):
         4. State the location and highlight any unique selling points.
         5. Maintain conversational context.
         6. Do NOT list other properties. Focus solely on this one.
+        7. CRITICAL: The price_min in the data is in LAKHS. You MUST convert this to CRORES for the user. (e.g., if price_min is 145, write it as '₹1.45 Cr'). Never display values above 100 as 'Lakhs' or 'Crores' without dividing by 100 first.
         """
     else:
         system_prompt = f"""
@@ -158,6 +160,7 @@ def responder_node(state: AgentState):
         2. Format as a numbered list (1., 2., 3.): "Project Name — BHK | Price | Highlights"
         3. Keep it professional and extremely concise.
         4. Maintain the context of a conversation.
+        5. CRITICAL: The price_min in the data is in LAKHS. You MUST convert this to CRORES for the user. (e.g., if price_min is 145, write it as '₹1.45 Cr'). Never display values above 100 as 'Lakhs' or 'Crores' without dividing by 100 first.
         """
     
     messages = [SystemMessage(content=system_prompt)]

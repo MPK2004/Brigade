@@ -20,18 +20,48 @@ with open(DATA_PATH, "r") as f:
 def extract_bhk(text):
     if not text:
         return []
-    matches = re.findall(r'\d+\.?\d*', str(text))
-    return [float(x) if "." in x else int(x) for x in matches]
+    text = str(text)
+    # 1. Expand range like "2-3"
+    ranges = re.findall(r'(\d+)\s*[-]\s*(\d+)', text)
+    range_bhk = []
+    for start, end in ranges:
+        for i in range(int(start), int(end) + 1):
+            range_bhk.append(i)
+    # 2. Extract all numbers
+    all_nums = re.findall(r'\d+\.?\d*', text)
+    found_bhk = [float(x) if "." in x else int(x) for x in all_nums]
+    # Merge and unique
+    return sorted(list(set(range_bhk + found_bhk)))
 
 def extract_price_range(text):
     if not text:
         return None, None
-    text = str(text).lower()
-    nums = re.findall(r'\d+\.?\d*', text)
-    nums = [float(x) for x in nums if x != "."]
-    if "cr" in text:
-        nums = [x * 100 for x in nums]
+    # 1. Clean symbols ₹, *, ,
+    text = str(text).replace("₹", "").replace("*", "").replace(",", "").lower()
+    # 2. Find numbers and units
+    matches = re.findall(r'(\d+\.?\d*)\s*(cr|crore|l|lakhs?)?', text)
+    nums = []
+    
+    # Check if there is a unit mentioned anywhere in the string that might apply to all numbers
+    is_crore = any(k in text for k in ["cr", "crore"])
+    is_lakh = any(k in text for k in ["l", "lakh"])
+    
+    for val, unit in matches:
+        if not val or val == ".": continue
+        v = float(val)
+        if unit:
+            if any(k in unit for k in ["cr", "crore"]):
+                v *= 100
+        else:
+            # If no unit for this number, apply global unit if unique
+            if is_crore and not is_lakh:
+                v *= 100
+        nums.append(v)
+    
     if len(nums) == 1:
+        # Check if the number is 9500000 (raw rupees) - common in some datasets
+        if nums[0] >= 100000:
+            nums[0] /= 100000
         return nums[0], None
     elif len(nums) >= 2:
         return nums[0], nums[1]
