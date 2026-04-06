@@ -10,7 +10,7 @@ from tools import search_tool
 
 # Split LLMs: 70b to think/plan reliably, 8b to respond rapidly
 planner_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
-responder_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
+responder_llm = ChatGroq(model="meta-llama/llama-prompt-guard-2-86m", temperature=0)
 
 class AgentState(TypedDict):
     query: str
