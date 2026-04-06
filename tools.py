@@ -6,16 +6,29 @@ load_dotenv(override=True)
 import atexit
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
+from thefuzz import fuzz
 
 # Qdrant Cloud Configuration
 QDRANT_URL = "https://138d05d6-0fcc-42d5-983f-41385270168a.sa-east-1-0.aws.cloud.qdrant.io:6333"
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 COLLECTION_NAME = "properties"
 
-# Initialize Client & Model
-client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-atexit.register(client.close)
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# Lazy initializers for standalone use
+_client = None
+_model = None
+
+def get_client():
+    global _client
+    if _client is None:
+        _client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+        atexit.register(_client.close)
+    return _client
+
+def get_model():
+    global _model
+    if _model is None:
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _model
 
 # Semantic Mappings for specific intents
 SEMANTIC_MAP = {
@@ -27,43 +40,58 @@ def hard_filter(payload, bhk=None, max_price=None, locality=None):
     """
     Deterministically exclude invalid results.
     """
+    p_name = payload.get("name", "Unknown")
     p_bhks = payload.get("bhk", [])
     p_price_min = payload.get("price_min")
-    p_locality = f"{payload.get('city', '')} {payload.get('locality', '')}".lower()
+    p_locality_raw = f"{payload.get('city', '')} {payload.get('locality', '')} {payload.get('name', '')} {payload.get('description', '')}".lower()
 
-    # Normalization for common city names
-    city_map = {"bangalore": "bengaluru", "bengaluru": "bangalore"}
-    
     # 1. BHK Constraint (Strict)
     if bhk:
         try:
             target_bhk = float(bhk)
             # Ensure strict matching in the list of floats
             if target_bhk not in [float(x) for x in p_bhks]:
+                print(f"DEBUG: {p_name} excluded - BHK {p_bhks} does not match {target_bhk}")
                 return False
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
-    # 2. Price Constraint (Strict - EXCLUSIVE as per user request)
+    # 2. Price Constraint (Soft - 10% Buffer)
     if max_price:
         try:
             limit = float(max_price)
-            # User sample: "under 300" returning 300 -> ❌ exclude. 
-            # Means: price_min must be strictly less than limit.
-            if p_price_min is None or p_price_min >= limit:
+            # Add 10% buffer as per request (inclusive match)
+            buffer_limit = limit * 1.1
+            if p_price_min is not None and p_price_min > buffer_limit:
+                print(f"DEBUG: {p_name} excluded - Price {p_price_min} > Limit {buffer_limit} (incl. 10% buffer)")
                 return False
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
-    # 3. Locality Constraint (Strict check with normalization)
+    # 3. Locality Constraint (Sequential Word Boundary)
     if locality:
         target_loc = str(locality).lower()
-        searchable_text = f"{p_locality} {payload.get('name', '')} {payload.get('description', '')}".lower()
+        # Common variations/abbreviations
+        location_mapping = {
+            "omr": "old madras road",
+            "orr": "outer ring road",
+            "sarjapur": "sarjapur road",
+            "blore": "bengaluru",
+            "blr": "bengaluru",
+            "bangalore": "bengaluru",
+            "hyd": "hyderabad",
+            "chennai": "chennai"
+        }
+        target_loc = location_mapping.get(target_loc, target_loc)
         
-        # Accept if target_loc is in text, OR if a valid mapped city is in text
-        mapped_loc = city_map.get(target_loc)
-        if target_loc not in searchable_text and (not mapped_loc or mapped_loc not in searchable_text):
-            return False
+        # Proximity Locality matching (Allows up to 3 filler words between tokens)
+        tokens = [re.escape(t) for t in re.split(r'[^a-zA-Z0-9]+', target_loc) if t]
+        if tokens:
+            separator = r"(?:\W+\w+){0,3}\W+"
+            pattern = rf"\b{separator.join(tokens)}\b"
+            if not re.search(pattern, p_locality_raw):
+                print(f"DEBUG: {p_name} excluded - Locality '{target_loc}' not found within proximity")
+                return False
 
     return True
 
@@ -101,6 +129,7 @@ def rerank(results, params):
     locality = params.get("locality")
     intents = params.get("intents", [])
     offset = params.get("offset", 0)
+    sort_price_asc = params.get("sort_price_asc", False)
 
     valid_results = []
     for r in results:
@@ -112,23 +141,32 @@ def rerank(results, params):
             final_score = r.score + s
             valid_results.append((final_score, payload))
 
-    # Sort valid results by score
-    valid_results.sort(key=lambda x: x[0], reverse=True)
+    # Add explicit price sorting if requested
+    if sort_price_asc:
+        print(f"DEBUG: Explicit price sorting enabled.")
+        valid_results.sort(key=lambda x: x[1].get("price_min") if x[1].get("price_min") is not None else float('inf'))
+    else:
+        # Sort valid results by score (semantic + intent)
+        valid_results.sort(key=lambda x: x[0], reverse=True)
     
     # Return exactly the Top 3 starting from the given offset
     return [p for _, p in valid_results[offset:offset+3]]
 
-def search_tool(query, params=None):
+def search_tool(query, params=None, client=None, model=None):
     """
     Strict retrieval pipeline with intent boosting.
     """
     if params is None:
         params = {}
+    
+    # Use provided resources or fallback to lazy defaults
+    active_client = client or get_client()
+    active_model = model or get_model()
         
-    query_vector = model.encode(query).tolist()
+    query_vector = active_model.encode(query).tolist()
 
     # Semantic Search (Broad Candidates)
-    results = client.query_points(
+    results = active_client.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
         limit=50
@@ -141,5 +179,5 @@ def search_tool(query, params=None):
 def search_projects(query: str):
     return search_tool(query)
 
-def filter_projects(bhk=None, location=None):
-    return search_tool("", params={"bhk": bhk, "locality": location})
+def filter_projects(bhk=None, location=None, sort_price_asc=None):
+    return search_tool("", params={"bhk": bhk, "locality": location, "sort_price_asc": sort_price_asc})

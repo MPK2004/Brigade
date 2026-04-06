@@ -3,6 +3,13 @@ import os
 from dotenv import load_dotenv
 load_dotenv(override=True)
 from agent import graph
+import tools
+# Shared Resource Caching (Ensures resources load ONLY ONCE and stay in memory)
+@st.cache_resource
+def get_shared_resources():
+    return tools.get_client(), tools.get_model()
+
+client, model = get_shared_resources()
 
 # Page Config
 st.set_page_config(page_title="Brigade Property Advisor", page_icon="🏢", layout="centered")
@@ -83,7 +90,9 @@ if prompt := st.chat_input("How can I help you find your home today?"):
                 "history": st.session_state.agent_history,
                 "tool_args": {},
                 "tool_result": [],
-                "response": ""
+                "response": "",
+                "client": client,
+                "model": model
             }
             
             # Execute Graph

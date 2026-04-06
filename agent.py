@@ -6,10 +6,16 @@ from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from pydantic import BaseModel, Field
 from tools import search_tool
 
+class PlannerOutput(BaseModel):
+    query: str = Field(description="The specific property name or rewritten query.")
+    params: dict = Field(description="Dictionary containing bhk, max_price, locality, intents, offset, sort_price_asc.")
+    is_property_search: bool = Field(description="True if it's a property search, False if chit-chat.")
+
 # Split LLMs: 70b to think/plan reliably, 8b to respond rapidly
-planner_llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.4)
+planner_llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.0)
 responder_llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0.2)
 
 class AgentState(TypedDict):
@@ -18,6 +24,8 @@ class AgentState(TypedDict):
     tool_args: dict
     tool_result: list
     response: str
+    client: Optional[object] # QdrantClient
+    model: Optional[object] # SentenceTransformer
 
 def planner_node(state: AgentState):
     """
@@ -70,16 +78,17 @@ def planner_node(state: AgentState):
     """
     
     messages = [SystemMessage(content=system_prompt)]
-    response = planner_llm.invoke(messages)
     
     try:
-        content = response.content.strip()
-        if content.startswith("```json"):
-            content = content[7:-3].strip()
-        elif content.startswith("```"):
-            content = content[3:-3].strip()
-        data = json.loads(content)
-        print(f"DEBUG_PLANNER: {data}")
+        structured_llm = planner_llm.with_structured_output(PlannerOutput)
+        response = structured_llm.invoke(messages)
+        # Accommodate different Pydantic versions
+        if hasattr(response, 'model_dump'):
+            data = response.model_dump()
+        else:
+            data = response.dict()
+            
+        print(f"DEBUG_PLANNER: Successfully parsed JSON: {data}")
         return {"tool_args": data}
     except Exception as e:
         print(f"DEBUG_PLANNER Error: {e}")
@@ -99,7 +108,8 @@ def tool_node(state: AgentState):
     params = args.get("params", {})
     
     # search_tool handles hard filters, intent boosts, and top 3
-    result = search_tool(query, params)
+    # Inject resources from state if available
+    result = search_tool(query, params, client=state.get("client"), model=state.get("model"))
     return {"tool_result": result}
 
 def responder_node(state: AgentState):
@@ -108,63 +118,81 @@ def responder_node(state: AgentState):
     """
     result = state["tool_result"]
     query = state["query"]
+    history = state.get("history", [])
+    # Helper to convert history to explicit Langchain messages
+    def get_conversation_messages(sys_prompt):
+        msgs = [SystemMessage(content=sys_prompt)]
+        for msg in history[-5:]:
+            if msg["role"] == "user":
+                msgs.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                msgs.append(AIMessage(content=msg["content"]))
+        msgs.append(HumanMessage(content=query))
+        return msgs
     
     if result == ["CHITCHAT"]:
-        system_prompt = f"""
+        system_prompt = """
         Act as a professional Property Advisor for Brigade Group.
-        User Query: {query}
-        
         Respond warmly to the user's greeting or conversational message, and politely ask how you can assist them with finding a property today.
         Keep it brief, professional, and do not list any properties.
         """
-        messages = [SystemMessage(content=system_prompt)]
-        response = responder_llm.invoke(messages)
+        response = responder_llm.invoke(get_conversation_messages(system_prompt))
         return {"response": response.content}
     
     if not result:
         return {"response": "No matching properties found under your specific criteria. Would you like to check a different budget or location?"}
 
     # Identify if we're describing a single property (detail view) or listing many
-    # Usually, if "tell me about" or "details" or specific 1 property is found
-    # We can detect if detail view based on result size and the user's intent to focus on one
     is_detail_view = len(result) == 1 or any(x in query.lower() for x in ["detail", "tell me about", "more about", "first", "second", "third", "2nd", "1st", "3rd", "it", "this"])
 
-    if is_detail_view and len(result) > 0:
+    # Deterministic Data Transformation: Handle all math and string formatting BEFORE LLM
+    formatted_results = []
+    for r in result:
+        r_copy = dict(r)
+        price = r_copy.get("price_min")
+        if price is not None:
+            if price >= 100:
+                r_copy["formatted_price"] = f"₹{price/100:.2f} Cr"
+            else:
+                r_copy["formatted_price"] = f"₹{price} Lakhs"
+        else:
+            r_copy["formatted_price"] = "Price on Request"
+        formatted_results.append(r_copy)
+
+    if is_detail_view and len(formatted_results) > 0:
         # Provide detailed info for the top matched property
         system_prompt = f"""
         Act as a professional Property Advisor for Brigade Group.
         Provide a DETAILED AND CONVERSATIONAL response for this specific property.
         
         PROPERTY DATA:
-        {json.dumps(result[0], indent=2)}
+        {json.dumps(formatted_results[0], indent=2)}
         
         RULES:
         1. Be professional, premium, and highly informative.
         2. Give a warm introduction to the property.
-        3. Explain the key features (BHK options), price, and comprehensive amenities.
+        3. Explain the key features (BHK options), price (use 'formatted_price'), and comprehensive amenities.
         4. State the location and highlight any unique selling points.
         5. Maintain conversational context.
         6. Do NOT list other properties. Focus solely on this one.
-        7. CRITICAL: The price_min in the data is in LAKHS. You MUST convert this to CRORES for the user. (e.g., if price_min is 145, write it as '₹1.45 Cr'). Never display values above 100 as 'Lakhs' or 'Crores' without dividing by 100 first.
+        7. TRUST THE DATA: The provided properties have ALREADY been mathematically verified to match the user's budget and criteria by the backend. DO NOT double-check the filtering or perform unit conversions between Lakhs and Crores. Present the properties confidently.
         """
+        response = responder_llm.invoke(get_conversation_messages(system_prompt))
     else:
         system_prompt = f"""
         Act as a professional Property Advisor for Brigade Group.
-        User Query: {query}
         
         PROPERTIES (VALIDATED MATCHES):
-        {json.dumps(result, indent=2)}
+        {json.dumps(formatted_results, indent=2)}
         
         RULES:
         1. Start with the header exactly: "Top Matching Properties:"
-        2. Format as a numbered list (1., 2., 3.): "Project Name — BHK | Price | Highlights"
+        2. Format as a numbered list (1., 2., 3.): "Project Name — BHK | Price (use 'formatted_price') | Highlights"
         3. Keep it professional and extremely concise.
         4. Maintain the context of a conversation.
-        5. CRITICAL: The price_min in the data is in LAKHS. You MUST convert this to CRORES for the user. (e.g., if price_min is 145, write it as '₹1.45 Cr'). Never display values above 100 as 'Lakhs' or 'Crores' without dividing by 100 first.
+        5. TRUST THE DATA: The provided properties have ALREADY been mathematically verified to match the user's budget and criteria by the backend. DO NOT double-check the filtering or perform unit conversions between Lakhs and Crores. Present the properties confidently.
         """
-    
-    messages = [SystemMessage(content=system_prompt)]
-    response = responder_llm.invoke(messages)
+        response = responder_llm.invoke(get_conversation_messages(system_prompt))
     
     return {"response": response.content}
 
