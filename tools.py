@@ -58,10 +58,10 @@ def hard_filter(payload, bhk=None, max_price=None, locality=None):
     # 3. Locality Constraint (Strict check with normalization)
     if locality:
         target_loc = str(locality).lower()
-        # Accept if direct match or known city mapping or if it's in the name
-        if target_loc not in p_locality and city_map.get(target_loc, "") not in p_locality:
-            if target_loc not in payload.get("name", "").lower():
-                return False
+        # Accept if direct match or known city mapping or if it's in the name or description
+        searchable_text = f"{p_locality} {payload.get('name', '')} {payload.get('description', '')}".lower()
+        if target_loc not in searchable_text and city_map.get(target_loc, "") not in searchable_text:
+            return False
 
     return True
 

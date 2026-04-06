@@ -56,6 +56,7 @@ def planner_node(state: AgentState):
     OUTPUT: {{"query": "whitefield", "params": {{"bhk": 3, "locality": "whitefield"}}}}
     
     Return ONLY JSON with 'query' and 'params' (bhk, max_price, locality, intents).
+    NOTE: 'locality' MUST capture any city, neighborhood, or area mentioned (e.g., 'Whitefield', 'Yelahanka', 'Chennai').
     """
     
     messages = [SystemMessage(content=system_prompt)]
