@@ -1,0 +1,6 @@
+streamlit
+langchain-groq
+langgraph
+qdrant-client
+sentence-transformers
+python-dotenv
