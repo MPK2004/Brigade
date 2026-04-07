@@ -36,31 +36,40 @@ def extract_bhk(text):
 def extract_price_range(text):
     if not text:
         return None, None
-    # 1. Clean symbols ₹, *, ,
-    text = str(text).replace("₹", "").replace("*", "").replace(",", "").lower()
-    # 2. Find numbers and units
-    matches = re.findall(r'(\d+\.?\d*)\s*(cr|crore|l|lakhs?)?', text)
+    text = str(text).replace("*", "").replace(",", "").lower()
+    
+    # 1. Capture numbers WITH units (high priority)
+    # Matches "8.40 Crore", "95 Lakhs", etc.
+    unit_matches = re.findall(r'(\d+(?:\.\d+)?)\s*(cr|crore|l|lakhs?)', text)
     nums = []
-    
-    # Check if there is a unit mentioned anywhere in the string that might apply to all numbers
-    is_crore = any(k in text for k in ["cr", "crore"])
-    is_lakh = any(k in text for k in ["l", "lakh"])
-    
-    for val, unit in matches:
-        if not val or val == ".": continue
-        v = float(val)
-        if unit:
+    if unit_matches:
+        for val, unit in unit_matches:
+            v = float(val)
             if any(k in unit for k in ["cr", "crore"]):
                 v *= 100
-        else:
-            # If no unit for this number, apply global unit if unique
-            if is_crore and not is_lakh:
-                v *= 100
-        nums.append(v)
+            nums.append(v)
     
+    # 2. Fallback to numbers without units (lower priority)
+    if not nums:
+        # Scrub BHK/Bed counts properly
+        # Matches numbers followed by "&", "and", ",", "BHK", "Bed" etc.
+        clean_text = re.sub(r'\d+(?=\s*(?:&|and|,|bhk|bed|bedroom|beds))', '', text)
+        # Also catch the final one: "4 BHK"
+        clean_text = re.sub(r'\d+\s*(?:bhk|bed|beds|bedroom|bedrooms)', '', clean_text)
+        
+        any_nums = re.findall(r'(\d+(?:\.\d+)?)', clean_text)
+        for val in any_nums:
+            v = float(val)
+            if ("cr" in text or "crore" in text) and "lakh" not in text:
+                v *= 100
+            nums.append(v)
+
+    if not nums:
+        return None, None
+    
+    # Return as min, max in Lakhs
     if len(nums) == 1:
-        # Check if the number is 9500000 (raw rupees) - common in some datasets
-        if nums[0] >= 100000:
+        if nums[0] >= 100000: # Handle raw rupees
             nums[0] /= 100000
         return nums[0], None
     elif len(nums) >= 2:
@@ -77,7 +86,14 @@ def is_luxury(price_min, description):
     return False
 
 def build_text(p):
-    return f"{p.get('name','')} {p.get('description','')} {p.get('city','')} {p.get('locality','')} {', '.join(p.get('amenities',[]))}"
+    nearby_text = ""
+    nearby = p.get("nearby", {})
+    if isinstance(nearby, dict):
+        for cat, places in nearby.items():
+            for item in places:
+                nearby_text += f"{item.get('place','')} {cat} "
+    
+    return f"{p.get('name','')} {p.get('description','')} {p.get('city','')} {p.get('locality','')} {p.get('property_type','')} {', '.join(p.get('amenities',[]))} {nearby_text}".strip()
 
 def run_ingestion():
     client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
@@ -98,14 +114,21 @@ def run_ingestion():
     print(f"Preprocessing data...")
     for p in DATA:
         name = p.get("name", "")
-        if "detail page" in name.lower():
+        if not name or "detail page" in name.lower():
             skipped_junk += 1
             continue
             
         bhk = extract_bhk(p.get("type"))
-        if not bhk or not name:
-            skipped_schema += 1
-            continue
+        
+        # Determine property type
+        prop_type = p.get("property_type") 
+        if not prop_type:
+            if bhk:
+                prop_type = "Apartment"
+            elif any(k in (p.get("type") or "").lower() or k in (p.get("description") or "").lower() for k in ["plot", "land"]):
+                prop_type = "Plot"
+            else:
+                prop_type = "Apartment"
 
         p_min, p_max = extract_price_range(p.get("price"))
         url = p.get("url", "")
@@ -117,9 +140,12 @@ def run_ingestion():
             "city": p.get("city", inferred_city).capitalize(),
             "locality": p.get("locality", "").capitalize(),
             "bhk": bhk,
+            "property_type": prop_type,
             "price_min": p_min,
             "price_max": p_max,
             "amenities": p.get("amenities", []),
+            "nearby": p.get("nearby", {}),
+            "faqs": p.get("faqs", []),
             "is_luxury": is_luxury(p_min, p.get("description")),
             "description": p.get("description"),
             "url": url,

@@ -163,19 +163,21 @@ def responder_node(state: AgentState):
         # Provide detailed info for the top matched property
         system_prompt = f"""
         Act as a professional Property Advisor for Brigade Group.
-        Provide a DETAILED AND CONVERSATIONAL response for this specific property.
+        Provide a DETAILED, PREMIUM, AND CONVERSATIONAL response for this specific property.
         
         PROPERTY DATA:
         {json.dumps(formatted_results[0], indent=2)}
         
-        RULES:
-        1. Be professional, premium, and highly informative.
-        2. Give a warm introduction to the property.
-        3. Explain the key features (BHK options), price (use 'formatted_price'), and comprehensive amenities.
-        4. State the location and highlight any unique selling points.
-        5. Maintain conversational context.
-        6. Do NOT list other properties. Focus solely on this one.
-        7. TRUST THE DATA: The provided properties have ALREADY been mathematically verified to match the user's budget and criteria by the backend. DO NOT double-check the filtering or perform unit conversions between Lakhs and Crores. Present the properties confidently.
+        GOLDEN RULES:
+        1. GROUNDING: ONLY use the provided PROPERTY DATA to answer. Do NOT use your own knowledge about Bangalore, Chennai, or specific property locations. If 'nearby' or 'faqs' are empty or missing a specific category, say "I don't have that specific information for this property."
+        2. NO HALLUCINATION: Do NOT invent nearby schools, hospitals, or landmarks. If the data says "Chrysalis High School (400 m)", use it. If it doesn't mention schools, do NOT list any.
+        3. STRUCTURE: 
+           - Use a warm, professional introduction.
+           - Present 'Amenities' as a bulleted list.
+           - Present 'Nearby Places' as a Markdown Table with columns: Category, Place, Distance.
+           - If there are 'FAQs', answer them naturally if relevant to the user's query.
+        4. PRICING: Use 'formatted_price'. The data is already validated.
+        5. CONTEXT: Maintain a helpful, advisory tone. Focus solely on this property.
         """
         response = responder_llm.invoke(get_conversation_messages(system_prompt))
     else:
@@ -188,9 +190,9 @@ def responder_node(state: AgentState):
         RULES:
         1. Start with the header exactly: "Top Matching Properties:"
         2. Format as a numbered list (1., 2., 3.): "Project Name — BHK | Price (use 'formatted_price') | Highlights"
-        3. Keep it professional and extremely concise.
-        4. Maintain the context of a conversation.
-        5. TRUST THE DATA: The provided properties have ALREADY been mathematically verified to match the user's budget and criteria by the backend. DO NOT double-check the filtering or perform unit conversions between Lakhs and Crores. Present the properties confidently.
+        3. GROUNDING: Use ONLY the provided list. Do NOT suggest properties not in this list.
+        4. PRICING: Use 'formatted_price'.
+        5. TONALITY: Professional, concise, and helpful.
         """
         response = responder_llm.invoke(get_conversation_messages(system_prompt))
     
