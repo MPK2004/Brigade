@@ -9,6 +9,45 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from pydantic import BaseModel, Field
 from tools import search_tool
 
+COMPANY_INFO = {
+    "Residential Enquiries": "Toll Free: 1800 102 9977",
+    "Customer Care": "1800 102 9480 / NRI: +91 96112 18222",
+    "Email": "here4you@brigadegroup.com"
+}
+
+def get_supported_cities():
+    """
+    Dynamically extract unique cities from the dataset to define operating boundaries.
+    """
+    data_path = os.path.join(os.path.dirname(__file__), "data/brigade.json")
+    if not os.path.exists(data_path):
+        return ["Bengaluru", "Chennai", "Hyderabad"]
+    
+    try:
+        with open(data_path, "r") as f:
+            data = json.load(f)
+        cities = set()
+        for p in data:
+            name = p.get("name", "")
+            if not name or "detail page" in name.lower():
+                continue
+            
+            city = p.get("city")
+            if not city:
+                url = p.get("url")
+                if url and isinstance(url, str):
+                    url_parts = url.split("/")
+                    city = url_parts[-2] if len(url_parts) > 2 else ""
+            
+            if city and isinstance(city, str):
+                cleaned_city = city.replace("-", " ").title()
+                cities.add(cleaned_city)
+        return sorted(list(cities)) if cities else ["Bengaluru", "Chennai", "Hyderabad"]
+    except Exception:
+        return ["Bengaluru", "Chennai", "Hyderabad"]
+
+SUPPORTED_CITIES = get_supported_cities()
+
 class PlannerOutput(BaseModel):
     query: str = Field(description="The specific property name or rewritten query.")
     params: dict = Field(description="Dictionary containing bhk, max_price, locality, intents, offset, sort_price_asc.")
@@ -74,7 +113,7 @@ def planner_node(state: AgentState):
     NOTE: 'locality' MUST capture any city, neighborhood, or area mentioned (e.g., 'Whitefield', 'Yelahanka', 'Chennai').
     NOTE: 'max_price' MUST be a number representing LAKHS (e.g., "1 Crore" = 100, "50 Lakhs" = 50).
     If the user asks for 'least', 'cheapest', or 'lowest price', set 'sort_price_asc': true in the params JSON.
-    If the user's input is just a greeting (e.g., "hi", "hello") or general conversation, set 'is_property_search' to false.
+    If the user's input is just a greeting (e.g., "hi", "hello") or general conversation (including asking for contact details, office locations, or support), set 'is_property_search' to false.
     """
     
     messages = [SystemMessage(content=system_prompt)]
@@ -131,16 +170,32 @@ def responder_node(state: AgentState):
         return msgs
     
     if result == ["CHITCHAT"]:
-        system_prompt = """
+        system_prompt = f"""
         Act as a professional Property Advisor for Brigade Group.
-        Respond warmly to the user's greeting or conversational message, and politely ask how you can assist them with finding a property today.
-        Keep it brief, professional, and do not list any properties.
+        Respond warmly to the user's message.
+        
+        INTERNAL KNOWLEDGE:
+        - COMPANY CONTACT INFO: {json.dumps(COMPANY_INFO, indent=2)}
+        - SUPPORTED CITIES (SERVICE AREAS): {', '.join(SUPPORTED_CITIES)}
+        
+        RULES:
+        1. SERVICE AREAS: If the user asks which cities/areas Brigade operates in, ONLY list: {', '.join(SUPPORTED_CITIES)}. Never invent or list cities not in this list.
+        2. CONTACT INFO: If the user asks for contact details, phone numbers, or emails, provide the info from COMPANY CONTACT INFO.
+        3. GREETINGS: If it's a greeting, respond warmly and ask how you can help them find a property today.
+        4. PROACTIVE ENGAGEMENT: End the response with a single, helpful question to guide them toward finding their next home.
+        5. Keep it brief and professional.
         """
         response = responder_llm.invoke(get_conversation_messages(system_prompt))
         return {"response": response.content}
     
     if not result:
-        return {"response": "No matching properties found under your specific criteria. Would you like to check a different budget or location?"}
+        params = state.get("tool_args", {}).get("params", {})
+        searched_loc = params.get("locality")
+        
+        if searched_loc and searched_loc.title() not in SUPPORTED_CITIES:
+            return {"response": f"I see you are looking for properties in {searched_loc.title()}, but Brigade Group currently only operates in {', '.join(SUPPORTED_CITIES)}. Would you like to explore our projects in those cities instead?"}
+        
+        return {"response": f"No matching properties found under your specific criteria in our supported cities ({', '.join(SUPPORTED_CITIES)}). Would you like to check a different budget or location?"}
 
     # Identify if we're describing a single property (detail view) or listing many
     is_detail_view = len(result) == 1 or any(x in query.lower() for x in ["detail", "tell me about", "more about", "first", "second", "third", "2nd", "1st", "3rd", "it", "this"])
@@ -175,9 +230,10 @@ def responder_node(state: AgentState):
            - Use a warm, professional introduction.
            - Present 'Amenities' as a bulleted list.
            - Present 'Nearby Places' as a Markdown Table with columns: Category, Place, Distance.
-           - If there are 'FAQs', answer them naturally if relevant to the user's query.
         4. PRICING: Use 'formatted_price'. The data is already validated.
         5. CONTEXT: Maintain a helpful, advisory tone. Focus solely on this property.
+        6. OPERATING BOUNDARIES: Brigade Group ONLY operates in {', '.join(SUPPORTED_CITIES)}. If the user asks about other cities, explicitly state we don't have properties there and offer to show projects in supported cities.
+        7. PROACTIVE ENGAGEMENT: End the response with a compelling, open-ended question that anticipates the user's next need. For example, ask if they'd like to schedule a site visit, check specific unit availability, or see similar projects in this locality.
         """
         response = responder_llm.invoke(get_conversation_messages(system_prompt))
     else:
@@ -188,11 +244,17 @@ def responder_node(state: AgentState):
         {json.dumps(formatted_results, indent=2)}
         
         RULES:
-        1. Start with the header exactly: "Top Matching Properties:"
-        2. Format as a numbered list (1., 2., 3.): "Project Name — BHK | Price (use 'formatted_price') | Highlights"
+        1. HEADER: Start ONLY with the header exactly: "Top Matching Properties:". Do NOT include any introductory conversational text or greetings.
+        2. LIST FORMAT: For each property, use the following Markdown structure:
+           ### [name]
+           - **Type:** [comma-separated list of BHKs] BHK (CRITICAL: OMIT this entire line if the 'bhk' list is empty)
+           - **Starting Price:** [formatted_price]
+           - **Highlights:** [locality] — [1-2 concise sentences from 'description' focusing on unique selling points]
         3. GROUNDING: Use ONLY the provided list. Do NOT suggest properties not in this list.
         4. PRICING: Use 'formatted_price'.
-        5. TONALITY: Professional, concise, and helpful.
+        5. ACCESSIBILITY: Use vertical stacking and bold labels. Absolutely NO pipes (|) or horizontal delimiters.
+        6. OPERATING BOUNDARIES: Brigade Group ONLY operates in {', '.join(SUPPORTED_CITIES)}.
+        7. PROACTIVE ENGAGEMENT: End the response with a single, helpful question to guide the user's next step. For example, ask if they want more details on a specific project or if they would like to adjust their budget or location filters.
         """
         response = responder_llm.invoke(get_conversation_messages(system_prompt))
     
