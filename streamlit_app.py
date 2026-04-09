@@ -1,5 +1,7 @@
 import streamlit as st
 import os
+import time
+import json
 from dotenv import load_dotenv
 load_dotenv(override=True)
 from agent import graph
@@ -83,26 +85,55 @@ if prompt := st.chat_input("How can I help you find your home today?"):
 
     # Process with Agent
     with st.chat_message("assistant"):
-        with st.spinner("Finding matches..."):
-            # Prepare state
-            state = {
-                "query": prompt,
-                "history": st.session_state.agent_history,
-                "tool_args": {},
-                "tool_result": [],
-                "response": "",
-                "client": client,
-                "model": model
-            }
-            
-            # Execute Graph
-            final_state = graph.invoke(state)
-            response = final_state["response"]
-            
-            # Display Response
-            st.markdown(response)
-            
-            # Update Session Histories
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            st.session_state.agent_history.append({"role": "user", "content": prompt})
-            st.session_state.agent_history.append({"role": "assistant", "content": response})
+        # 1. UI Status Management
+        status = st.status("Thinking...", expanded=True)
+        
+        # 2. Generator with Dynamic UI Updates
+        def response_generator(state, status_box):
+            # Stream state updates from LangGraph
+            for update in graph.stream(state, stream_mode="updates"):
+                for node, values in update.items():
+                    if node == "planner":
+                        status_box.update(label="🤔 Analyzing your requirements...", state="running")
+                    
+                    elif node == "tool":
+                        status_box.update(label="📂 Accessing Database Source...", state="running")
+                        result = values.get("tool_result", [])
+                        if result:
+                            with status_box:
+                                if result == ["CHITCHAT"]:
+                                    st.markdown("✨ *Casual query detected. No DB retrieval needed.*")
+                                else:
+                                    st.markdown(f"#### RAW DATABASE KNOWLEDGE ({len(result)} records)")
+                                    for p in result:
+                                        st.markdown(f"**Source Record: {p.get('name', 'N/A')}**")
+                                        st.code(json.dumps(p, indent=2), language="json")
+                    
+                    elif node == "responder":
+                        response_content = values.get("response", "")
+                        if response_content:
+                            status_box.update(label="✅ Matches found!", state="complete", expanded=False)
+                            # To simulate streaming effect for better UX
+                            words = response_content.split(" ")
+                            for i in range(len(words)):
+                                yield words[i] + " "
+                                time.sleep(0.01)
+
+        # Prepare state
+        state = {
+            "query": prompt,
+            "history": st.session_state.agent_history,
+            "tool_args": {},
+            "tool_result": [],
+            "response": "",
+            "client": client,
+            "model": model
+        }
+        
+        # 4. Stream and collect final response string
+        full_response = st.write_stream(response_generator(state, status))
+        
+        # Update Session Histories
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
+        st.session_state.agent_history.append({"role": "user", "content": prompt})
+        st.session_state.agent_history.append({"role": "assistant", "content": full_response})
